@@ -41,6 +41,7 @@ class Scraper {
             result.pagesScraped.push(url);
 
             // 1. Scrape Home Page
+            await this.autoScroll(page);
             await this.extractData(page, result);
 
             // 2. Find and Navigate to Contact Page
@@ -54,6 +55,7 @@ class Scraper {
                 if (!result.pagesScraped.includes(contactUrl)) {
                     await page.goto(contactUrl, { waitUntil: 'networkidle2', timeout: 30000 });
                     result.pagesScraped.push(contactUrl);
+                    await this.autoScroll(page);
                     await this.extractData(page, result);
                 }
             } else {
@@ -135,6 +137,25 @@ class Scraper {
                 }
             }
             return null;
+        });
+    }
+
+    async autoScroll(page) {
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                var totalHeight = 0;
+                var distance = 100;
+                var timer = setInterval(() => {
+                    var scrollHeight = document.body.scrollHeight;
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+
+                    if(totalHeight >= scrollHeight - window.innerHeight){
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 100);
+            });
         });
     }
 }
