@@ -233,15 +233,23 @@ with tab1:
 
 # --- TAB 2: Bulk Upload ---
 with tab2:
-    st.write("Upload a list of websites to scrape.")
-    uploaded_file = st.file_uploader("Upload CSV, Excel, or Text file", type=["csv", "xlsx", "txt"])
+    st.write("Upload a list of websites **OR** paste them below.")
     
+    col_upload, col_paste = st.columns(2)
+    
+    with col_upload:
+        uploaded_file = st.file_uploader("Upload CSV, Excel, or Text file", type=["csv", "xlsx", "txt"])
+    
+    with col_paste:
+        paste_input = st.text_area("Paste URLs (one per line)", height=150, placeholder="example.com\nhttps://site.org\nwww.another.net")
+
+    urls = []
+    
+    # Process File Input
     if uploaded_file:
-        urls = []
         try:
             if uploaded_file.name.endswith('.csv'):
                 df_input = pd.read_csv(uploaded_file)
-                # Try to find a column that looks like 'url' or 'website'
                 possible_cols = [c for c in df_input.columns if 'url' in c.lower() or 'website' in c.lower()]
                 target_col = possible_cols[0] if possible_cols else df_input.columns[0]
                 urls = df_input[target_col].dropna().astype(str).tolist()
@@ -258,59 +266,68 @@ with tab2:
         except Exception as e:
             st.error(f"Error reading file: {e}")
 
-        if urls:
-            st.success(f"Found {len(urls)} URLs.")
-            st.write(f"Preview: {urls[:3]}...")
+    # Process Paste Input (Append to file input if both exist)
+    if paste_input:
+        pasted_urls = [line.strip() for line in paste_input.splitlines() if line.strip()]
+        urls.extend(pasted_urls)
+    
+    # Remove duplicates
+    urls = list(set(urls))
+
+    if urls:
+        st.success(f"Ready to scrape {len(urls)} unique URLs.")
+        with st.expander("Preview URLs"):
+            st.write(urls)
+        
+        if st.button("Start Bulk Scraping", type="primary", key="bulk_scrape"):
+            results_list = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            if st.button("Start Bulk Scraping", type="primary", key="bulk_scrape"):
-                results_list = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+            for i, url in enumerate(urls):
+                status_text.text(f"Scraping {i+1}/{len(urls)}: {url}")
+                target_url = clean_url(url)
                 
-                for i, url in enumerate(urls):
-                    status_text.text(f"Scraping {i+1}/{len(urls)}: {url}")
-                    target_url = clean_url(url)
+                try:
+                    data = scrape_with_playwright(target_url)
                     
-                    try:
-                        data = scrape_with_playwright(target_url)
-                        
-                        all_emails = list(set(data["home_emails"] + data["contact_emails"]))
-                        all_phones = list(set(data["home_phones"] + data["contact_phones"]))
-                        
-                        results_list.append({
-                            "Input URL": url,
-                            "Scraped URL": target_url,
-                            "Emails": ", ".join(all_emails),
-                            "Phones": ", ".join(all_phones),
-                            "Contact Page Found": data["contact_url"] if data["contact_url"] else "No",
-                            "Errors": "; ".join(data["errors"]) if data["errors"] else "None"
-                        })
-                    except Exception as e:
-                        results_list.append({
-                            "Input URL": url,
-                            "Scraped URL": target_url,
-                            "Emails": "",
-                            "Phones": "",
-                            "Contact Page Found": "Error",
-                            "Errors": str(e)
-                        })
+                    all_emails = list(set(data["home_emails"] + data["contact_emails"]))
+                    all_phones = list(set(data["home_phones"] + data["contact_phones"]))
                     
-                    progress_bar.progress((i + 1) / len(urls))
+                    results_list.append({
+                        "Input URL": url,
+                        "Scraped URL": target_url,
+                        "Emails": ", ".join(all_emails),
+                        "Phones": ", ".join(all_phones),
+                        "Contact Page Found": data["contact_url"] if data["contact_url"] else "No",
+                        "Errors": "; ".join(data["errors"]) if data["errors"] else "None"
+                    })
+                except Exception as e:
+                    results_list.append({
+                        "Input URL": url,
+                        "Scraped URL": target_url,
+                        "Emails": "",
+                        "Phones": "",
+                        "Contact Page Found": "Error",
+                        "Errors": str(e)
+                    })
                 
-                status_text.text("Bulk scraping complete!")
-                
-                # Create DataFrame
-                df_results = pd.DataFrame(results_list)
-                
-                # Show Table
-                st.subheader("Results")
-                st.dataframe(df_results)
-                
-                # CSV Download
-                csv = df_results.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Results as CSV",
-                    data=csv,
-                    file_name="scraped_results.csv",
-                    mime="text/csv",
-                )
+                progress_bar.progress((i + 1) / len(urls))
+            
+            status_text.text("Bulk scraping complete!")
+            
+            # Create DataFrame
+            df_results = pd.DataFrame(results_list)
+            
+            # Show Table
+            st.subheader("Results")
+            st.dataframe(df_results)
+            
+            # CSV Download
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Results as CSV",
+                data=csv,
+                file_name="scraped_results.csv",
+                mime="text/csv",
+            )
