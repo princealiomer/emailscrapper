@@ -5,6 +5,7 @@ import time
 import os
 import subprocess
 import sys
+import pandas as pd
 
 # Page Config
 st.set_page_config(
@@ -70,30 +71,34 @@ def extract_phones(text):
     return list(set(valid_phones))
 
 
+# --- Core Scraping Logic ---
+
 def auto_scroll(page):
     """Scrolls to bottom of page to trigger lazy loading"""
-    page.evaluate("""
-        async () => {
-            await new Promise((resolve) => {
-                var totalHeight = 0;
-                var distance = 100;
-                var timer = setInterval(() => {
-                    var scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
+    try:
+        page.evaluate("""
+            async () => {
+                await new Promise((resolve) => {
+                    var totalHeight = 0;
+                    var distance = 200; # Increased distance for speed
+                    var timer = setInterval(() => {
+                        var scrollHeight = document.body.scrollHeight;
+                        window.scrollBy(0, distance);
+                        totalHeight += distance;
 
-                    if(totalHeight >= scrollHeight - window.innerHeight){
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 100);
-            });
-        }
-    """)
-    # Wait a moment after scrolling
-    time.sleep(2)
+                        if(totalHeight >= scrollHeight - window.innerHeight){
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 50); # Faster interval
+                });
+            }
+        """)
+        time.sleep(1) # Reduced wait
+    except:
+        pass
 
-def scrape_with_playwright(start_url):
+def process_single_url(context, start_url):
     results = {
         "home_emails": [],
         "home_phones": [],
@@ -103,26 +108,17 @@ def scrape_with_playwright(start_url):
         "errors": []
     }
     
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Context with user agent to avoid basic blocking
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        )
-        page = context.new_page()
-        
+    page = context.new_page()
+    try:
         # 1. Scrape Home Page
         try:
-            st.info(f"Scanning Home Page: {start_url}")
-            page.goto(start_url, timeout=30000, wait_until="domcontentloaded")
+            page.goto(start_url, timeout=20000, wait_until="domcontentloaded")
             auto_scroll(page)
             
             content = page.inner_text("body")
-            html_content = page.content() # for mailto/tel links if needed
             
+            # Emails
             results["home_emails"] = extract_emails(content)
-            
-            # Also searching mailto links specifically
             mailto_emails = page.evaluate("""() => {
                 const links = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
                 return links.map(a => a.href.replace('mailto:', '').split('?')[0]);
@@ -131,34 +127,33 @@ def scrape_with_playwright(start_url):
                 results["home_emails"].extend(mailto_emails)
             results["home_emails"] = list(set(results["home_emails"]))
             
+            # Phones
             results["home_phones"] = extract_phones(content)
 
         except Exception as e:
-            results["errors"].append(f"Home Page Error: {str(e)}")
-            return results # Stop if home page fails hard
+            results["errors"].append(f"Home error: {str(e)}")
+            # We continue to try contact page even if home scrape failed partially? 
+            # Usually if goto fails, we can't find contact link.
+            # But let's try to find contact link if page loaded at all.
 
         # 2. Find Contact Page
         try:
-            # Simple heuristic: Look for a link with "contact" text
-            # We can use Playwright selector for this
             contact_element = page.query_selector('a:has-text("Contact"), a:has-text("contact"), a[href*="contact"]')
             
             if contact_element:
                 contact_href = contact_element.get_attribute("href")
-                # Resolve relative URL
                 from urllib.parse import urljoin
                 contact_url = urljoin(start_url, contact_href)
                 results["contact_url"] = contact_url
                 
-                st.info(f"Found Contact Page: {contact_url}. Scanning...")
-                
-                page.goto(contact_url, timeout=30000, wait_until="domcontentloaded")
+                # Navigate
+                page.goto(contact_url, timeout=20000, wait_until="domcontentloaded")
                 auto_scroll(page)
                 
                 contact_content = page.inner_text("body")
                 
+                # Emails
                 results["contact_emails"] = extract_emails(contact_content)
-                
                 contact_mailto = page.evaluate("""() => {
                     const links = Array.from(document.querySelectorAll('a[href^="mailto:"]'));
                     return links.map(a => a.href.replace('mailto:', '').split('?')[0]);
@@ -167,16 +162,28 @@ def scrape_with_playwright(start_url):
                     results["contact_emails"].extend(contact_mailto)
                 results["contact_emails"] = list(set(results["contact_emails"]))
 
+                # Phones
                 results["contact_phones"] = extract_phones(contact_content)
-            else:
-                st.warning("No 'Contact' link found on home page. Skipping contact page scan.")
-
+                
         except Exception as e:
-            results["errors"].append(f"Contact Page Error: {str(e)}")
-
-        browser.close()
+            pass # Contact page not found or failed, ignore
+            
+    except Exception as e:
+        results["errors"].append(str(e))
+    finally:
+        page.close()
         
     return results
+
+def scrape_with_playwright(start_url):
+    """Single URL wrapper"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent="Mozilla/5.0")
+        results = process_single_url(context, start_url)
+        browser.close()
+    return results
+
 
 
 # --- GUI ---
@@ -284,35 +291,43 @@ with tab2:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            for i, url in enumerate(urls):
-                status_text.text(f"Scraping {i+1}/{len(urls)}: {url}")
-                target_url = clean_url(url)
+            # Launch browser ONCE for the whole batch
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(user_agent="Mozilla/5.0")
                 
-                try:
-                    data = scrape_with_playwright(target_url)
+                for i, url in enumerate(urls):
+                    status_text.text(f"Scraping {i+1}/{len(urls)}: {url}")
+                    target_url = clean_url(url)
                     
-                    all_emails = list(set(data["home_emails"] + data["contact_emails"]))
-                    all_phones = list(set(data["home_phones"] + data["contact_phones"]))
+                    try:
+                        # Use the shared process function with our persistent context
+                        data = process_single_url(context, target_url)
+                        
+                        all_emails = list(set(data["home_emails"] + data["contact_emails"]))
+                        all_phones = list(set(data["home_phones"] + data["contact_phones"]))
+                        
+                        results_list.append({
+                            "Input URL": url,
+                            "Scraped URL": target_url,
+                            "Emails": ", ".join(all_emails),
+                            "Phones": ", ".join(all_phones),
+                            "Contact Page Found": data["contact_url"] if data["contact_url"] else "No",
+                            "Errors": "; ".join(data["errors"]) if data["errors"] else "None"
+                        })
+                    except Exception as e:
+                        results_list.append({
+                            "Input URL": url,
+                            "Scraped URL": target_url,
+                            "Emails": "",
+                            "Phones": "",
+                            "Contact Page Found": "Error",
+                            "Errors": str(e)
+                        })
                     
-                    results_list.append({
-                        "Input URL": url,
-                        "Scraped URL": target_url,
-                        "Emails": ", ".join(all_emails),
-                        "Phones": ", ".join(all_phones),
-                        "Contact Page Found": data["contact_url"] if data["contact_url"] else "No",
-                        "Errors": "; ".join(data["errors"]) if data["errors"] else "None"
-                    })
-                except Exception as e:
-                    results_list.append({
-                        "Input URL": url,
-                        "Scraped URL": target_url,
-                        "Emails": "",
-                        "Phones": "",
-                        "Contact Page Found": "Error",
-                        "Errors": str(e)
-                    })
+                    progress_bar.progress((i + 1) / len(urls))
                 
-                progress_bar.progress((i + 1) / len(urls))
+                browser.close()
             
             status_text.text("Bulk scraping complete!")
             
